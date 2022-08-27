@@ -3,8 +3,8 @@
 sensor_msgs/PointCloud2 input_pc     	# defines the point cloud on which grasps should be calculated (objects)
 string goal_frame_id				 	# the frame_id to which the point cloud should be transformed before grasps are calculated
 geometry_msgs/Point grasp_area_center 	# center of the region where grasps are searched
-float32 grasp_area_length_x				# defines the length of the rectangle (in x direction (in m)) where grasps are searched (with center grasp_area_center)
-float32 grasp_area_length_y				# defines the length of the rectangle (in y direction (in m)) where grasps are searched (with center grasp_area_center)
+float32 grasp_area_length_x				# defines the length of the rectangle (in x direction (in cm)) where grasps are searched (with center grasp_area_center)
+float32 grasp_area_length_y				# defines the length of the rectangle (in y direction (in cm)) where grasps are searched (with center grasp_area_center)
 
 
 duration max_calculation_time			# maximal calculation time before grasp result is returned
