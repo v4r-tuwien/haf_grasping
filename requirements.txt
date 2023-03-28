@@ -1,2 +1,4 @@
 numpy==1.23.0
 ros_numpy==0.0.5
+open3d==0.15.2
+open3d-ros-hlper==0.2.0.3
