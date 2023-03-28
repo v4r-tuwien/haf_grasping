@@ -20,7 +20,9 @@ find_package(catkin REQUIRED COMPONENTS
   tf
   pcl_msgs
   message_generation
-  visualization_msgs  
+  visualization_msgs
+  robokudo_msgs
+  rospy
 )
 
 #find_package(OpenCV 2 REQUIRED)
