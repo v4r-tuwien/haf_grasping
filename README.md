@@ -1,3 +1,79 @@
+# HAF Grasping
+Calculates grasp points for unknown and known objects represented by the surface point cloud data.
+
+Author:  David Fischinger, Vienna University of Technology
+
+
+## Initial Setup
+
+### Step 1: Clone Repository into catkin workspace
+```shell
+git clone https://github.com/v4r-tuwien/haf_grasping.git ~/catkin_ws/src/haf_grasping
+```
+
+Don't forget to switch branches with
+```
+cd ~/catkin_ws/src/haf_grasping
+git checkout bremen_wrapper
+```
+
+### Step 2: Build libsvm
+You need to ```cd``` to the libsvm-3.12 folder and invoke ```make```, e.g.
+```shell
+cd ~/catkin_ws/src/haf_grasping/libvsm-3.12
+make
+```
+
+### Step 3: Satisfy dependencies
+The following ROS-packages should be installed:
+- roscpp
+- roslib
+- sensor_msgs
+- std_msgs
+- image_geometry
+- actionlib_msgs
+- geometry_msgs
+- actionlib
+- pcl_conversions 
+- pcl_ros
+- tf
+- pcl_msgs
+- message_generation
+- visualization_msgs
+- robokudo_msgs
+- rospy
+
+To install python dependencies:
+```shell
+cd ~/catkin_ws/src/haf_grasping
+pip install -r requirements.txt
+```
+
+### Step 4: Build workspace
+```shell
+cd ~/catkin_ws
+catkin build
+```
+
+## Starting the Wrapper
+Update ```config/params.yml``` first.
+
+Afterwards simply run
+```shell
+roslaunch haf_grasping haf_grasping_all.launch
+```
+
+This starts the wrapper which has the topic ```/pose_estimator/find_grasppose_haf``` and [GenericImgProcAnnotator](https://gitlab.informatik.uni-bremen.de/robokudo/robokudo_msgs/-/blob/main/action/GenericImgProcAnnotator.action) action-message.
+This actionserver makes a request to an inital object detection actionserver (f.e. densefusion-verefine or ppf-verefine) which should have the topic ```/pose_estimator/find_grasppose``` and [GenericImgProcAnnotator](https://gitlab.informatik.uni-bremen.de/robokudo/robokudo_msgs/-/blob/main/action/GenericImgProcAnnotator.action) action-message.
+Afterwards the wrapper makes a call to the HAF-server to calculate grasppoints for the detected objects.
+These refined grasppoints are then returned to the actionclient.
+
+The refines grasppoints are visualized as a rviz-MarkerArray at the topic ```/pose_estimator/haf_grasp_markers```
+
+
+
+
+## Original Readme
 ==========================================================
 ==               PACKAGE: haf_grasping   	        ==
 ==========================================================
