@@ -27,16 +27,14 @@ class HAF_Wrapper():
         self.detector = actionlib.SimpleActionClient('/pose_estimator/find_grasppose', GenericImgProcAnnotatorAction)
         res = self.detector.wait_for_server(rospy.Duration(10.0))
         if res is False:
-            rospy.logerr('Timeout when trying to connect to actionserver find_grasppose')
-            sys.exit(-1)
+            raise rospy.ROSException('Timeout when trying to connect to actionserver find_grasppose')
 
         rospy.loginfo('Connecting to HAF server')
         self.haf_client = actionlib.SimpleActionClient(
             '/calc_grasppoints_svm_action_server', CalcGraspPointsServerAction)
         res_haf = self.haf_client.wait_for_server(rospy.Duration(10.0))
         if res_haf is False:
-            rospy.logerr('Timeout when trying to connect to actionserver calc_grasppoints_svm_action_server ')
-            sys.exit(-1)
+            raise rospy.ROSException('Timeout when trying to connect to actionserver calc_grasppoints_svm_action_server')
 
         self.marker_pub = rospy.Publisher('/pose_estimator/haf_grasp_markers', MarkerArray, queue_size=10, latch=True)
         self.Transformer = tf.TransformListener(True, rospy.Duration(10))
