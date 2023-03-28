@@ -1,7 +1,5 @@
-width: 640
-height: 480
-intrinsics:
-- [538.391033533567, 0.0, 315.3074696331638]
-- [0.0, 538.085452058436, 233.0483557773859]
-- [0.0, 0.0, 1.0]
-depth_to_m: 1000
+haf_wrapper:
+  camera_info_topic: /hsrb/head_rgbd_sensor/depth_registered/camera_info  # camera info from camera that created the depthimage
+  base_frame: base_link                                                   # should be a frame with z pointing upwards relative to floor
+  depth_scale: 1000                                                       # depth_img is scaled by 1/depth_scale when transformed to pointcloud
+  grasppoint_offset: 0.04                                                 # offset to correct initial haf estimation

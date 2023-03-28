@@ -11,10 +11,10 @@ from open3d_ros_helper import open3d_ros_helper as orh
 from tf.transformations import (quaternion_about_axis, quaternion_from_matrix,
                                 quaternion_multiply, unit_vector)
 from geometry_msgs.msg import PoseStamped
-from object_detector_msgs.msg import GenericImgProcAnnotatorAction
+from robokudo_msgs.msg import GenericImgProcAnnotatorAction
 from haf_grasping.msg import CalcGraspPointsServerAction, CalcGraspPointsServerActionGoal
 from visualization_msgs.msg import MarkerArray, Marker
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import CameraInfo
 
 
 class HAF_Wrapper():
@@ -22,10 +22,10 @@ class HAF_Wrapper():
     def __init__(self):
         self.server = actionlib.SimpleActionServer('/pose_estimator/find_grasppose_haf', GenericImgProcAnnotatorAction, self.find_grasppose,
                                                    auto_start=False)
-        
+
         rospy.loginfo('Connecting to Detector')
-        self.client = actionlib.SimpleActionClient('/pose_estimator/find_grasppose', GenericImgProcAnnotatorAction)
-        res = self.client.wait_for_server(rospy.Duration(10.0))
+        self.detector = actionlib.SimpleActionClient('/pose_estimator/find_grasppose', GenericImgProcAnnotatorAction)
+        res = self.detector.wait_for_server(rospy.Duration(10.0))
         if res is False:
             rospy.logerr('Timeout when trying to connect to actionserver find_grasppose')
             sys.exit(-1)
@@ -46,35 +46,42 @@ class HAF_Wrapper():
     
 
     def find_grasppose(self, req):
-        self.client.send_goal(req)
-        self.client.wait_for_result()
-        detector_result = self.client.get_result()
+        self.detector.send_goal(req)
+        self.detector.wait_for_result()
+        detector_result = self.detector.get_result()
         if len(detector_result.pose_results) == 0:
             rospy.logerr('No poses found by detector')
             self.server.set_aborted()
         rospy.loginfo('Got estimations from initial Detector')
+
         frame_id = req.depth.header.frame_id
+
         pc = self.convert_depth_img_to_pcd(req.depth)
         rospy.loginfo('Converted depth image to pcd')
+
         pose_list = []
         rospy.loginfo('Calling HAF')
+        base_frame = rospy.get_param('/haf_wrapper/base_frame')
         for pose in detector_result.pose_results:
-            self.Transformer.waitForTransform('base_link', frame_id, rospy.Time(), rospy.Duration(4.0))
+            # Haf preprocessing needs poses in a frame with the z-axis pointing upwards (relative to floor)
+            self.Transformer.waitForTransform(base_frame, frame_id, rospy.Time(), rospy.Duration(4.0))
             pose_stamped = PoseStamped()
             pose_stamped.pose = pose
             pose_stamped.header.stamp = rospy.Time()
             pose_stamped.header.frame_id = frame_id
-            pose_stamped_tr = self.Transformer.transformPose('base_link', pose_stamped)
+            pose_stamped_tr = self.Transformer.transformPose(base_frame, pose_stamped)
 
             haf_result = self.call_haf(pc, pose_stamped_tr)
             if haf_result.graspOutput.eval <= 0:
                 rospy.logerr(
                     'HAF grasping did not deliver successful result. Eval below 0\n' +
                     'Eval: ' + str(haf_result.graspOutput.eval))
-                # return pose_stamped from original detector
+
+                # return pose_stamped from original detector in failure case
                 pose_stamped = pose_stamped
             else:
-                pose_stamped = self.convert_haf_result_to_moveit_convention(haf_result, frame_id)
+                # return pose_stamped from haf in succesful case
+                pose_stamped = self.convert_haf_result_to_moveit_convention(haf_result, frame_id, base_frame)
             pose_list.append(pose_stamped.pose)
 
         rospy.loginfo('Finished calling HAF')
@@ -118,22 +125,27 @@ class HAF_Wrapper():
         
 
     def convert_depth_img_to_pcd(self, depth_img):
-        depth_scale = rospy.get_param('/depth_to_m')
-        width = rospy.get_param('/width')
-        height = rospy.get_param('/height')
-        intrinsics = np.array(rospy.get_param('/intrinsics'))
+        cam_info_topic = rospy.get_param('/haf_wrapper/camera_info_topic')
+        depth_scale = rospy.get_param('/haf_wrapper/depth_scale')
+        cam_info = rospy.wait_for_message(cam_info_topic, CameraInfo, 10.0)
+        width = cam_info.width
+        height = cam_info.height
+        intrinsics = np.array(cam_info.K).reshape(3, 3)
         fx = intrinsics[0, 0]
         fy = intrinsics[1, 1]
         cx = intrinsics[0, 2]
         cy = intrinsics[1, 2]
         cam_intr = o3d.camera.PinholeCameraIntrinsic(width, height, fx, fy, cx, cy)
+
         depth_img_np = ros_numpy.numpify(depth_img)
         depth_img_o3d = o3d.geometry.Image(depth_img_np.astype(np.uint16))
-        o3d_pcd = o3d.geometry.PointCloud.create_from_depth_image(depth_img_o3d, cam_intr)
-        ros_pcd = orh.o3dpc_to_rospc(o3d_pcd, frame_id = depth_img.header.frame_id, stamp=depth_img.header.stamp)
+
+        o3d_pcd = o3d.geometry.PointCloud.create_from_depth_image(depth_img_o3d, cam_intr, depth_scale=depth_scale)
+        ros_pcd = orh.o3dpc_to_rospc(o3d_pcd, frame_id = depth_img.header.frame_id, stamp=rospy.Time())
+
         return ros_pcd
     
-    def convert_haf_result_to_moveit_convention(self, grasp_result_haf, frame_id):
+    def convert_haf_result_to_moveit_convention(self, grasp_result_haf, target_frame_id, base_frame_id):
         '''
         Transforms pose and approachVector from haf into single pose.
         '''
@@ -156,7 +168,7 @@ class HAF_Wrapper():
         q = quaternion_from_matrix(rot_mat)
 
         self.Transformer.waitForTransform(
-            frame_id, 'base_link', rospy.Time(), rospy.Duration(4.0))
+            target_frame_id, base_frame_id, rospy.Time(), rospy.Duration(4.0))
 
         grasp_pose_bl = PoseStamped()
 
@@ -165,14 +177,14 @@ class HAF_Wrapper():
         grasp_pose_bl.pose.orientation.z = q[2]
         grasp_pose_bl.pose.orientation.w = q[3]
         grasp_pose_bl.pose.position.x = grasp_result_haf.graspOutput.averagedGraspPoint.x - \
-            rospy.get_param("/grasppoint_offset_haf", default=0.04) * av[0]
+            rospy.get_param("/haf_wrapper/grasppoint_offset", default=0.04) * av[0]
         grasp_pose_bl.pose.position.y = grasp_result_haf.graspOutput.averagedGraspPoint.y - \
-            rospy.get_param("/grasppoint_offset_haf", default=0.04) * av[1]
+            rospy.get_param("/haf_wrapper/grasppoint_offset", default=0.04) * av[1]
         grasp_pose_bl.pose.position.z = grasp_result_haf.graspOutput.averagedGraspPoint.z - \
-            rospy.get_param("/grasppoint_offset_haf", default=0.04) * av[2]
-        grasp_pose_bl.header.frame_id = 'base_link'
+            rospy.get_param("/haf_wrapper/grasppoint_offset", default=0.04) * av[2]
+        grasp_pose_bl.header.frame_id = base_frame_id
 
-        grasp_pose = self.Transformer.transformPose(frame_id, grasp_pose_bl)
+        grasp_pose = self.Transformer.transformPose(target_frame_id, grasp_pose_bl)
         return grasp_pose
 
 
