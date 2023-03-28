@@ -1,11 +1,13 @@
 #! /usr/bin/env python3
 import sys
+import open3d as o3d
 from math import pi
 import rospy
 import actionlib
 import numpy as np
 import ros_numpy
 import tf
+from open3d_ros_helper import open3d_ros_helper as orh
 from tf.transformations import (quaternion_about_axis, quaternion_from_matrix,
                                 quaternion_multiply, unit_vector)
 from geometry_msgs.msg import PoseStamped
@@ -39,7 +41,6 @@ class HAF_Wrapper():
         self.marker_pub = rospy.Publisher('/grasp_markers', MarkerArray, queue_size=10, latch=True)
         self.Transformer = tf.TransformListener(True, rospy.Duration(10))
 
-        self.pub = rospy.Publisher('/pc/aaa', PointCloud2, queue_size=10)
         self.server.start()
         rospy.loginfo('Server started')
     
@@ -54,10 +55,6 @@ class HAF_Wrapper():
         rospy.loginfo('Got estimations from initial Detector')
         frame_id = req.depth.header.frame_id
         pc = self.convert_depth_img_to_pcd(req.depth)
-        while not rospy.is_shutdown():
-            self.pub.publish(pc)
-            rospy.sleep(0.1)
-            break
         rospy.loginfo('Converted depth image to pcd')
         pose_list = []
         rospy.loginfo('Calling HAF')
@@ -75,8 +72,7 @@ class HAF_Wrapper():
                     'HAF grasping did not deliver successful result. Eval below 0\n' +
                     'Eval: ' + str(haf_result.graspOutput.eval))
                 # return pose_stamped from original detector
-                #TODO remove again
-                pose_stamped = PoseStamped()
+                pose_stamped = pose_stamped
             else:
                 pose_stamped = self.convert_haf_result_to_moveit_convention(haf_result, frame_id)
             pose_list.append(pose_stamped.pose)
@@ -123,31 +119,19 @@ class HAF_Wrapper():
 
     def convert_depth_img_to_pcd(self, depth_img):
         depth_scale = rospy.get_param('/depth_to_m')
+        width = rospy.get_param('/width')
+        height = rospy.get_param('/height')
         intrinsics = np.array(rospy.get_param('/intrinsics'))
         fx = intrinsics[0, 0]
         fy = intrinsics[1, 1]
         cx = intrinsics[0, 2]
         cy = intrinsics[1, 2]
-        
-        np_img = ros_numpy.image.image_to_numpy(depth_img)
-        grid = np.mgrid[0:np_img.shape[0], 0:np_img.shape[1]]
-        u, v = grid[0], grid[1]
-        z = np_img/depth_scale
-        x = (u-cx)*z/fx
-        y = (v-cy)*z/fy
-        pc = np.stack([x, y, z], axis=-1)
-        pc = np.recarray((np_img.shape[0], np_img.shape[1]), dtype=[('x', np.float32), ('y', np.float32), ('z', np.float32), ('r', np.float32),('g', np.float32), ('b', np.float32)])
-        pc.x = x
-        pc.y = y
-        pc.z = z
-        pc.r = np.ones((np_img.shape[0], np_img.shape[1]))
-        pc.g = np.ones((np_img.shape[0], np_img.shape[1]))
-        pc.b = np.zeros((np_img.shape[0], np_img.shape[1]))
-        ros_pc = ros_numpy.msgify(PointCloud2, pc, stamp=depth_img.header.stamp, frame_id=depth_img.header.frame_id)
-        #TODO frame fuckery issue before haf but I have no idea where/why because rviz doesn't like to show this pointcloud
-        print(ros_pc.header)
-
-        return ros_pc
+        cam_intr = o3d.camera.PinholeCameraIntrinsic(width, height, fx, fy, cx, cy)
+        depth_img_np = ros_numpy.numpify(depth_img)
+        depth_img_o3d = o3d.geometry.Image(depth_img_np.astype(np.uint16))
+        o3d_pcd = o3d.geometry.PointCloud.create_from_depth_image(depth_img_o3d, cam_intr)
+        ros_pcd = orh.o3dpc_to_rospc(o3d_pcd, frame_id = depth_img.header.frame_id, stamp=depth_img.header.stamp)
+        return ros_pcd
     
     def convert_haf_result_to_moveit_convention(self, grasp_result_haf, frame_id):
         '''
