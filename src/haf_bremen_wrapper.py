@@ -1,5 +1,5 @@
 #! /usr/bin/env python3
-import sys
+import os
 import open3d as o3d
 from math import pi
 import rospy
@@ -10,8 +10,8 @@ import tf
 from open3d_ros_helper import open3d_ros_helper as orh
 from tf.transformations import (quaternion_about_axis, quaternion_from_matrix,
                                 quaternion_multiply, unit_vector)
-from geometry_msgs.msg import PoseStamped
-from robokudo_msgs.msg import GenericImgProcAnnotatorAction
+from geometry_msgs.msg import PoseStamped, Pose
+from robokudo_msgs.msg import GenericImgProcAnnotatorAction, GenericImgProcAnnotatorResult
 from haf_grasping.msg import CalcGraspPointsServerAction, CalcGraspPointsServerActionGoal
 from visualization_msgs.msg import MarkerArray, Marker
 from sensor_msgs.msg import CameraInfo
@@ -22,12 +22,6 @@ class HAF_Wrapper():
     def __init__(self):
         self.server = actionlib.SimpleActionServer('/pose_estimator/find_grasppose_haf', GenericImgProcAnnotatorAction, self.find_grasppose,
                                                    auto_start=False)
-
-        rospy.loginfo('Connecting to Detector')
-        self.detector = actionlib.SimpleActionClient('/pose_estimator/find_grasppose', GenericImgProcAnnotatorAction)
-        res = self.detector.wait_for_server(rospy.Duration(10.0))
-        if res is False:
-            raise rospy.ROSException('Timeout when trying to connect to actionserver find_grasppose')
 
         rospy.loginfo('Connecting to HAF server')
         self.haf_client = actionlib.SimpleActionClient(
@@ -41,26 +35,70 @@ class HAF_Wrapper():
 
         self.server.start()
         rospy.loginfo('Server started')
+        self.depth_scale = None
+        self.cam_info = None
     
 
     def find_grasppose(self, req):
-        self.detector.send_goal(req)
-        self.detector.wait_for_result()
-        detector_result = self.detector.get_result()
-        if len(detector_result.pose_results) == 0:
-            rospy.logerr('No poses found by detector')
-            self.server.set_aborted()
-        rospy.loginfo('Got estimations from initial Detector')
-
+        self.get_cam_info()
         frame_id = req.depth.header.frame_id
-
-        pc = self.convert_depth_img_to_pcd(req.depth)
+        depth_img_np = ros_numpy.numpify(req.depth)
+        ros_pcd, _ = self.convert_depth_img_to_pcd(depth_img_np, frame_id)
         rospy.loginfo('Converted depth image to pcd')
 
-        pose_list = []
+        if len(req.bb_detections) > 0:
+            center_poses = self.get_center_poses_from_bbs_2D(req.bb_detections, depth_img_np)
+        elif len(req.mask_detections) > 0:
+            #TODO how to handle? Any value != 0 as 'True'?
+            raise NotImplementedError
+        else:
+            rospy.logerr("No bounding boxes or masks where passed! Aborting ...")
+            self.server.set_aborted("No bb or masks passed to HAF!")
+
         rospy.loginfo('Calling HAF')
+        pose_list = self.get_grasp_poses(center_poses, frame_id, ros_pcd)
+        rospy.loginfo('Finished calling HAF')
+
+        self.add_markers(pose_list, frame_id)
+        rospy.loginfo('Published MarkerArray')
+
+        result = GenericImgProcAnnotatorResult()
+        result.success = True
+        result.bounding_boxes = req.bb_detections
+        result.pose_results = pose_list
+        result.descriptions = ['Unknown Object'] * len(pose_list)
+        result.class_names = result.descriptions
+        self.server.set_succeeded(result)
+        rospy.loginfo('Done')
+
+
+    def get_cam_info(self):
+        cam_info_topic = rospy.get_param('/haf_wrapper/camera_info_topic')
+        self.depth_scale = rospy.get_param('/haf_wrapper/depth_scale')
+        self.cam_info = rospy.wait_for_message(cam_info_topic, CameraInfo, 10.0)
+
+
+    def get_center_poses_from_bbs_2D(self, bbs_2D, depth_img):
+        center_poses = []
+        o3d_pcd_scene = self.convert_depth_img_to_o3d_pcd(depth_img)
+        for bb_2D in bbs_2D:
+            depth_img_obj = np.full_like(depth_img, np.nan)
+            y, x = bb_2D.y_offset, bb_2D.x_offset
+            h, w = bb_2D.height, bb_2D.width
+            depth_img_obj[y:y+h, x:x+w] = depth_img[y:y+h, x:x+w]
+            o3d_pcd = self.convert_depth_img_to_o3d_pcd(depth_img_obj)
+            center = o3d_pcd.get_center()
+            center_pose = Pose()
+            center_pose.position.x = center[0]
+            center_pose.position.y = center[1]
+            center_pose.position.z = center[2]
+            center_poses.append(center_pose)
+        return center_poses
+
+    def get_grasp_poses(self, center_poses, frame_id, ros_pcd):
+        pose_list = []
         base_frame = rospy.get_param('/haf_wrapper/base_frame')
-        for pose in detector_result.pose_results:
+        for i, pose in enumerate(center_poses):
             # Haf preprocessing needs poses in a frame with the z-axis pointing upwards (relative to floor)
             self.Transformer.waitForTransform(base_frame, frame_id, rospy.Time(), rospy.Duration(4.0))
             pose_stamped = PoseStamped()
@@ -69,28 +107,20 @@ class HAF_Wrapper():
             pose_stamped.header.frame_id = frame_id
             pose_stamped_tr = self.Transformer.transformPose(base_frame, pose_stamped)
 
-            haf_result = self.call_haf(pc, pose_stamped_tr)
+            haf_result = self.call_haf(ros_pcd, pose_stamped_tr)
             if haf_result.graspOutput.eval <= 0:
                 rospy.logerr(
                     'HAF grasping did not deliver successful result. Eval below 0\n' +
-                    'Eval: ' + str(haf_result.graspOutput.eval))
-
-                # return pose_stamped from original detector in failure case
+                    'Eval: ' + str(haf_result.graspOutput.eval) +
+                    'Returning center pose for object with index i=' + str(i) + ' instead')
+                # return center pose in failure case?
                 pose_stamped = pose_stamped
             else:
                 # return pose_stamped from haf in succesful case
                 pose_stamped = self.convert_haf_result_to_moveit_convention(haf_result, frame_id, base_frame)
             pose_list.append(pose_stamped.pose)
-
-        rospy.loginfo('Finished calling HAF')
-        self.add_markers(pose_list, frame_id)
-        rospy.loginfo('Published MarkerArray')
-        detector_result.pose_results = pose_list
-
-        self.server.set_succeeded(detector_result)
-        rospy.loginfo('Done')
-
-
+        
+        return pose_list
 
     def call_haf(self, pc, search_center, search_center_z_offset=0.1, grasp_area_length_x=30, grasp_area_length_y=30):
         # approach vector for top grasps
@@ -122,30 +152,31 @@ class HAF_Wrapper():
         return grasp_result
         
 
-    def convert_depth_img_to_pcd(self, depth_img):
-        cam_info_topic = rospy.get_param('/haf_wrapper/camera_info_topic')
-        depth_scale = rospy.get_param('/haf_wrapper/depth_scale')
-        cam_info = rospy.wait_for_message(cam_info_topic, CameraInfo, 10.0)
-        width = cam_info.width
-        height = cam_info.height
-        intrinsics = np.array(cam_info.K).reshape(3, 3)
+    def convert_depth_img_to_o3d_pcd(self, depth_img):
+        width = self.cam_info.width
+        height = self.cam_info.height
+        intrinsics = np.array(self.cam_info.K).reshape(3, 3)
         fx = intrinsics[0, 0]
         fy = intrinsics[1, 1]
         cx = intrinsics[0, 2]
         cy = intrinsics[1, 2]
         cam_intr = o3d.camera.PinholeCameraIntrinsic(width, height, fx, fy, cx, cy)
 
-        depth_img_np = ros_numpy.numpify(depth_img)
-        depth_img_o3d = o3d.geometry.Image(depth_img_np.astype(np.uint16))
+        depth_img_o3d = o3d.geometry.Image(depth_img.astype(np.uint16))
+        #o3d.io.write_image('/root/HSR/catkin_ws/src/haf_grasping/'+str(rospy.get_rostime())+'.png', depth_img_o3d)
 
-        o3d_pcd = o3d.geometry.PointCloud.create_from_depth_image(depth_img_o3d, cam_intr, depth_scale=depth_scale)
-        ros_pcd = orh.o3dpc_to_rospc(o3d_pcd, frame_id = depth_img.header.frame_id, stamp=rospy.Time())
+        o3d_pcd = o3d.geometry.PointCloud.create_from_depth_image(depth_img_o3d, cam_intr, depth_scale=self.depth_scale)
+        return o3d_pcd
 
-        return ros_pcd
+    def convert_depth_img_to_pcd(self, depth_img, frame_id):
+        o3d_pcd = self.convert_depth_img_to_o3d_pcd(depth_img)
+        ros_pcd = orh.o3dpc_to_rospc(o3d_pcd, frame_id = frame_id, stamp=rospy.Time())
+        return ros_pcd, o3d_pcd
     
+
     def convert_haf_result_to_moveit_convention(self, grasp_result_haf, target_frame_id, base_frame_id):
         '''
-        Transforms pose and approachVector from haf into single pose.
+        Transforms pose and approachVector from haf into single pose following moveit-convention for orientation.
         '''
         av = unit_vector([-grasp_result_haf.graspOutput.approachVector.x,
                           -grasp_result_haf.graspOutput.approachVector.y,
@@ -218,6 +249,7 @@ class HAF_Wrapper():
         marker.color.b = 0
         return marker
 
+
     def add_markers(self, pose_goals, frame_id):
         marker_arr = MarkerArray()
         delete_marker = Marker()
@@ -228,6 +260,8 @@ class HAF_Wrapper():
             marker = self.create_marker(id, pose_goal, frame_id)
             marker_arr.markers.append(marker)
         self.marker_pub.publish(marker_arr)
+
+
 
 if __name__ == '__main__':
     rospy.init_node('Haf_grasping_bremen_wrapper')

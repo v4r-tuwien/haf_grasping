@@ -64,13 +64,13 @@ roslaunch haf_grasping haf_grasping_all.launch
 ```
 
 This starts the wrapper which has the topic ```/pose_estimator/find_grasppose_haf``` and [GenericImgProcAnnotator](https://gitlab.informatik.uni-bremen.de/robokudo/robokudo_msgs/-/blob/main/action/GenericImgProcAnnotator.action) action-message.
-This actionserver makes a request to an inital object detection actionserver (f.e. densefusion-verefine or ppf-verefine) which should have the topic ```/pose_estimator/find_grasppose``` and [GenericImgProcAnnotator](https://gitlab.informatik.uni-bremen.de/robokudo/robokudo_msgs/-/blob/main/action/GenericImgProcAnnotator.action) action-message.
-Afterwards the wrapper makes a call to the HAF-server to calculate grasppoints for the detected objects.
+This actionserver uses the passed bounding boxes or masks (if boxes are not available) to calculate the center pose for each object.
+Those center poses are then passed to the HAF-server, which calculates grasppoints for the detected objects.
 These refined grasppoints are then returned to the actionclient.
 
 The refines grasppoints are visualized as a rviz-MarkerArray at the topic ```/pose_estimator/haf_grasp_markers```
 
-
+Currently the center pose of the passed boundingbox/mask is returned if HAF grasping fails to find a grasppoint for a certain object.
 
 
 ## Original Readme
