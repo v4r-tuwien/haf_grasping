@@ -54,10 +54,14 @@ class HAF_Wrapper():
         else:
             rospy.logerr("No bounding boxes or masks where passed! Aborting ...")
             self.server.set_aborted("No bb or masks passed to HAF!")
-
         rospy.loginfo('Calling HAF')
-        pose_list = self.get_grasp_poses(center_poses, frame_id, ros_pcd)
-        rospy.loginfo('Finished calling HAF')
+        pose_list, unsuccesful_calls_idx = self.get_grasp_poses(center_poses, frame_id, ros_pcd)
+        rospy.loginfo(f'Finished calling HAF. Detected grasp_poses for {len(pose_list)} object!')
+
+        rospy.loginfo('Removing objects with unsuccesful calls to HAF')
+        for idx in sorted(unsuccesful_calls_idx, reverse=True):
+            req.bb_detections.pop(idx)
+        assert len(req.bb_detections) == len(pose_list), 'Somehow removing objects with an unsucessful call failed'
 
         self.add_markers(pose_list, frame_id)
         rospy.loginfo('Published MarkerArray')
@@ -97,6 +101,7 @@ class HAF_Wrapper():
 
     def get_grasp_poses(self, center_poses, frame_id, ros_pcd):
         pose_list = []
+        unsuccesful_calls_idx = []
         base_frame = rospy.get_param('/haf_wrapper/base_frame')
         for i, pose in enumerate(center_poses):
             # Haf preprocessing needs poses in a frame with the z-axis pointing upwards (relative to floor)
@@ -111,16 +116,15 @@ class HAF_Wrapper():
             if haf_result.graspOutput.eval <= 0:
                 rospy.logerr(
                     'HAF grasping did not deliver successful result. Eval below 0\n' +
-                    'Eval: ' + str(haf_result.graspOutput.eval) +
-                    'Returning center pose for object with index i=' + str(i) + ' instead')
-                # return center pose in failure case?
-                pose_stamped = pose_stamped
+                    'Eval: ' + str(haf_result.graspOutput.eval) + '\n' + 
+                    'Skipping grasp point estimation for object with index i=' + str(i))
+                unsuccesful_calls_idx.append(i)
             else:
                 # return pose_stamped from haf in succesful case
                 pose_stamped = self.convert_haf_result_to_moveit_convention(haf_result, frame_id, base_frame)
-            pose_list.append(pose_stamped.pose)
+                pose_list.append(pose_stamped.pose)
         
-        return pose_list
+        return pose_list, unsuccesful_calls_idx
 
     def call_haf(self, pc, search_center, search_center_z_offset=0.1, grasp_area_length_x=30, grasp_area_length_y=30):
         # approach vector for top grasps
@@ -244,9 +248,9 @@ class HAF_Wrapper():
         marker.scale.z = 0.01
 
         marker.color.a = 1.0
-        marker.color.r = 1.0
+        marker.color.r = 0.0
         marker.color.g = 0
-        marker.color.b = 0
+        marker.color.b = 1.0
         return marker
 
 
