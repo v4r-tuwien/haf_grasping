@@ -26,9 +26,12 @@ class HAF_Wrapper():
         rospy.loginfo('Connecting to HAF server')
         self.haf_client = actionlib.SimpleActionClient(
             '/calc_grasppoints_svm_action_server', CalcGraspPointsServerAction)
-        res_haf = self.haf_client.wait_for_server(rospy.Duration(10.0))
-        if res_haf is False:
-            raise rospy.ROSException('Timeout when trying to connect to actionserver calc_grasppoints_svm_action_server')
+        while True:
+            res_haf = self.haf_client.wait_for_server(rospy.Duration(10.0))
+            if res_haf is False:
+                rospy.logerr("Timeout when trying to connect to actionserver calc_grasppoints_svm_action_server. Trying again ...")
+            else:
+                break
 
         self.marker_pub = rospy.Publisher('/pose_estimator/haf_grasp_markers', MarkerArray, queue_size=10, latch=True)
         self.Transformer = tf.TransformListener(True, rospy.Duration(10))
@@ -55,23 +58,17 @@ class HAF_Wrapper():
             rospy.logerr("No bounding boxes or masks where passed! Aborting ...")
             self.server.set_aborted("No bb or masks passed to HAF!")
         rospy.loginfo('Calling HAF')
-        pose_list, unsuccesful_calls_idx = self.get_grasp_poses(center_poses, frame_id, ros_pcd)
+        pose_list, _, scores = self.get_grasp_poses(center_poses, frame_id, ros_pcd)
         rospy.loginfo(f'Finished calling HAF. Detected grasp_poses for {len(pose_list)} object!')
-
-        rospy.loginfo('Removing objects with unsuccesful calls to HAF')
-        for idx in sorted(unsuccesful_calls_idx, reverse=True):
-            req.bb_detections.pop(idx)
-        assert len(req.bb_detections) == len(pose_list), 'Somehow removing objects with an unsucessful call failed'
 
         self.add_markers(pose_list, frame_id)
         rospy.loginfo('Published MarkerArray')
 
         result = GenericImgProcAnnotatorResult()
         result.success = True
-        result.bounding_boxes = req.bb_detections
         result.pose_results = pose_list
-        result.descriptions = ['Unknown Object'] * len(pose_list)
-        result.class_names = result.descriptions
+        result.class_names = ['Unknown Object'] * len(pose_list)
+        result.class_confidences = scores
         self.server.set_succeeded(result)
         rospy.loginfo('Done')
 
@@ -102,6 +99,7 @@ class HAF_Wrapper():
     def get_grasp_poses(self, center_poses, frame_id, ros_pcd):
         pose_list = []
         unsuccesful_calls_idx = []
+        eval_scores = []
         base_frame = rospy.get_param('/haf_wrapper/base_frame')
         for i, pose in enumerate(center_poses):
             # Haf preprocessing needs poses in a frame with the z-axis pointing upwards (relative to floor)
@@ -123,8 +121,9 @@ class HAF_Wrapper():
                 # return pose_stamped from haf in succesful case
                 pose_stamped = self.convert_haf_result_to_moveit_convention(haf_result, frame_id, base_frame)
                 pose_list.append(pose_stamped.pose)
+                eval_scores.append(haf_result.graspOutput.eval)
         
-        return pose_list, unsuccesful_calls_idx
+        return pose_list, unsuccesful_calls_idx, eval_scores
 
     def call_haf(self, pc, search_center, search_center_z_offset=0.1, grasp_area_length_x=30, grasp_area_length_y=30):
         # approach vector for top grasps
